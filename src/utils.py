@@ -18,10 +18,10 @@ def get_lr(optimizer):
         return param_group['lr']
 
 def get_device():
-    if torch.backends.mps.is_available():
-        return torch.device('mps')
     if torch.cuda.is_available():
         return torch.device('cuda:0')
+    if torch.backends.mps.is_available():
+        return torch.device('mps')
     return torch.device('cpu')
 
 def beautiful_int(i):

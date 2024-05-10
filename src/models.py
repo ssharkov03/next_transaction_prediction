@@ -2,7 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BertModel, BertConfig, GPT2Model, GPT2Config
+from transformers import BertModel, BertConfig, GPT2Model, GPT2Config, MambaConfig, MambaModel, JambaConfig, JambaModel
 
 
 class LSTMSequenceModel(nn.Module):
@@ -121,14 +121,43 @@ class SelectiveStateSpace(nn.Module):
         return h_next, y
 
 
+# class MambaSequenceModel(nn.Module):
+#     def __init__(self, hidden_dim, feature2vocab_dict):
+#         super(MambaSequenceModel, self).__init__()
+#         self.features_list = feature2vocab_dict.keys()
+#         self.embeddings = nn.ModuleList([nn.Embedding(feature2vocab_dict[feature_name], hidden_dim) for feature_name in self.features_list])
+#         output_vocab_size = feature2vocab_dict['mcc']
+#         self.hidden_dim = hidden_dim
+#         self.ssm = SelectiveStateSpace(hidden_dim, hidden_dim, output_vocab_size)
+
+#     def forward(self, x):  # batch_size x seq_len x num_features
+#         embedded = torch.cat([self.embeddings[i](x[..., i]).unsqueeze(2) for i in range(len(self.features_list))], dim=2) # batch_size x seq_len x num_features x hidden_dim
+        
+#         # Суммируем вдоль фичей
+#         embedded = embedded.sum(dim=2)  # batch_size x seq_len x hidden_dim
+
+#         # Mamba magic
+#         batch_size, seq_len, _ = embedded.size()
+#         h = torch.zeros(batch_size, self.hidden_dim, device=embedded.device)
+
+#         outputs = []
+#         for t in range(seq_len):
+#             h, y = self.ssm(embedded[:, t, :], h)
+#             outputs.append(y)
+
+#         logits = torch.stack(outputs, dim=1)
+#         return logits
+
+
 class MambaSequenceModel(nn.Module):
     def __init__(self, hidden_dim, feature2vocab_dict):
         super(MambaSequenceModel, self).__init__()
         self.features_list = feature2vocab_dict.keys()
         self.embeddings = nn.ModuleList([nn.Embedding(feature2vocab_dict[feature_name], hidden_dim) for feature_name in self.features_list])
-        output_vocab_size = feature2vocab_dict['mcc']
-        self.hidden_dim = hidden_dim
-        self.ssm = SelectiveStateSpace(hidden_dim, hidden_dim, output_vocab_size)
+        config = MambaConfig(hidden_size=hidden_dim, num_hidden_layers=4, state_size=8)
+        self.mamba = MambaModel(config)
+        self.output_layer = nn.Linear(hidden_dim, feature2vocab_dict['mcc']) # projection to dict
+
 
     def forward(self, x):  # batch_size x seq_len x num_features
         embedded = torch.cat([self.embeddings[i](x[..., i]).unsqueeze(2) for i in range(len(self.features_list))], dim=2) # batch_size x seq_len x num_features x hidden_dim
@@ -136,34 +165,61 @@ class MambaSequenceModel(nn.Module):
         # Суммируем вдоль фичей
         embedded = embedded.sum(dim=2)  # batch_size x seq_len x hidden_dim
 
-        # Mamba magic
-        batch_size, seq_len, _ = embedded.size()
-        h = torch.zeros(batch_size, self.hidden_dim, device=embedded.device)
+        outputs = self.mamba(inputs_embeds=embedded)
+        last_hidden_states = outputs.last_hidden_state
 
-        outputs = []
-        for t in range(seq_len):
-            h, y = self.ssm(embedded[:, t, :], h)
-            outputs.append(y)
-
-        logits = torch.stack(outputs, dim=1)
+        # Apply the output layer to predict the next feature
+        logits = self.output_layer(last_hidden_states)  # batch_size x seq_len x vocab_size
         return logits
 
+
+class JambaSequenceModel(nn.Module):
+    def __init__(self, hidden_dim, feature2vocab_dict):
+        super(JambaSequenceModel, self).__init__()
+        self.features_list = feature2vocab_dict.keys()
+        self.embeddings = nn.ModuleList([nn.Embedding(feature2vocab_dict[feature_name], hidden_dim) for feature_name in self.features_list])
+        config = JambaConfig(hidden_size=hidden_dim, num_hidden_layers=4, intermediate_size=hidden_dim * 2, num_key_value_heads=3, num_attention_heads=4, num_experts=4, state_size=8, use_mamba_kernels=False)
+        self.jamba = JambaModel(config)
+        self.output_layer = nn.Linear(hidden_dim, feature2vocab_dict['mcc']) # projection to dict
+
+
+    def forward(self, x):  # batch_size x seq_len x num_features
+        embedded = torch.cat([self.embeddings[i](x[..., i]).unsqueeze(2) for i in range(len(self.features_list))], dim=2) # batch_size x seq_len x num_features x hidden_dim
+        
+        # Суммируем вдоль фичей
+        embedded = embedded.sum(dim=2)  # batch_size x seq_len x hidden_dim
+
+        # Создаем маску для аттеншна, чтобы иммитировать авторегрессивность (не заглядываем вперед)
+        batch_size = embedded.size(0)
+        seq_length = embedded.size(1)
+        causal_mask = torch.tril(torch.ones((batch_size, seq_length, seq_length), dtype=torch.long)).to(x.device)
+
+
+        outputs = self.jamba(inputs_embeds=embedded, attention_mask=causal_mask)
+        last_hidden_states = outputs.last_hidden_state
+
+        # Apply the output layer to predict the next feature
+        logits = self.output_layer(last_hidden_states)  # batch_size x seq_len x vocab_size
+        return logits
 
 
 
 if __name__ == '__main__':
     from dataset import get_mappings
-    _, feature2vocab_size = get_mappings(train_data="../part_000_0_to_23646.parquet", features_list=["mcc", "day_of_week", "payment_system"])
+    from utils import get_device
+    _, feature2vocab_size = get_mappings(train_data="../data/part_000_0_to_23646.parquet", features_list=["mcc", "day_of_week", "payment_system"])
 
 
     # Простой конфиг модели
     hidden_dim = 128 
+    device = get_device()
 
-    model_classes = [LSTMSequenceModel, BertSequenceModel, GPT2SequenceModel, MambaSequenceModel]
+    model_classes = [LSTMSequenceModel, BertSequenceModel, GPT2SequenceModel, MambaSequenceModel, JambaSequenceModel]
     for model_class in model_classes:
         model = model_class(hidden_dim, feature2vocab_dict=feature2vocab_size)
+        model.to(device)
 
         input_tensor = torch.randint(0, 1, (10, 7, 3))  # (batch_size, seq_len, num_features) (10, 7, 3)
         print(f"\nTesting {str(model_class)}\nInput tensor shape:", input_tensor.shape)
-        logits = model(input_tensor)
+        logits = model(input_tensor.to(device))
         print("Output tensor shape:", logits.shape)  # (batch_size, seq_len, target_feature_vocab_size) (10, 7, 112)  
