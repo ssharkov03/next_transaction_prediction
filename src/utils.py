@@ -12,6 +12,7 @@ from collections import defaultdict
 from tqdm import tqdm
 from einops import rearrange
 from IPython.display import clear_output
+from sklearn.metrics import f1_score, precision_score, recall_score
 
 def get_lr(optimizer):
     for param_group in optimizer.param_groups:
@@ -117,28 +118,43 @@ def val(model, loader, criterion, metric_names=None, device=get_device()):
             logits = model(seq_batch[:, 0:-1, ...])
             target = seq_batch[:, 1:None, 0]  # take 1st feature in feature_list as target (mcc)
             
-            pred = rearrange(logits, "bs seq vocab -> (bs seq) vocab")
-            target = rearrange(target, "bs seq -> (bs seq)")
-
-
-            loss = criterion(pred, target)
+            
+            loss = criterion(rearrange(logits, "bs seq vocab -> (bs seq) vocab"), 
+                             rearrange(target, "bs seq -> (bs seq)"))
             losses_val.append(loss.item())
             
+            
+
             # Можете добавить сюда любые метрики, которые хочется 
             if metric_names is not None:
                 if 'accuracy' in metric_names:
-                    preds = torch.argsort(pred, dim=-1, descending=True)
+                    preds = torch.argsort(logits, dim=-1, descending=True) 
                     for k in metric_names["accuracy"]["top"]:
                         metrics[f'accuracy ~ top#{k}'].append(
-                            np.mean([target[i] in preds[i, :k] for i in range(target.shape[0])])
+                            np.mean([target[i, j] in preds[i, j, :k] for j in range(target.shape[1]) for i in range(target.shape[0])])
                         )
+                if 'f1_score' in metric_names:
+                    preds = torch.argmax(logits, dim=-1).cpu().detach() 
+                    metrics['f1_score'].append(
+                        f1_score(target.cpu().detach().flatten(), preds.flatten(), average="weighted")
+                    )
+                if 'precision_score' in metric_names:
+                    preds = torch.argmax(logits, dim=-1).cpu().detach()
+                    metrics['precision_score'].append(
+                        precision_score(target.cpu().detach().flatten(), preds.flatten(), average="weighted")
+                    )
+                if 'recall_score' in metric_names:
+                    preds = torch.argmax(logits, dim=-1).cpu().detach()
+                    metrics['recall_score'].append(
+                        recall_score(target.cpu().detach().flatten(), preds.flatten(), average="weighted")
+                    )
 
         if metric_names is not None:
             for name in metrics:
                 metrics[name] = np.mean(metrics[name])
-    
-    return np.mean(losses_val), metrics if metric_names else None
 
+
+    return np.mean(losses_val), metrics if metric_names else None
 def learning_loop(
     model,
     optimizer,
@@ -324,20 +340,28 @@ class CosineWarmupScheduler(torch.optim.lr_scheduler._LRScheduler):
             lr_factor *= epoch * 1.0 / self.warmup
         return lr_factor
 
+def num_params_stats(model_class, hidden_dim, feature2vocab_dict):
+    model, optimizer = create_model_and_optimizer(
+        model_class=model_class, 
+        model_params=dict(hidden_dim=hidden_dim, feature2vocab_dict=feature2vocab_dict),
+        lr=3e-4,
+    )
+    sum_params, sum_learnable_params = model_num_params(model, verbose_all=False)
+
+
 def train_pipeline(model_class, model_name, dataloader_train, dataloader_val, feature2vocab_size, hidden_dim=128, epochs=10):
     """
     Общая функция пайплайна тренировки модели (для простоты вызова в ноутбуке)
     """
     device = get_device()
 
-    # Убедитесь что всё сработало и создалось нормально и без ошибок
     model, optimizer = create_model_and_optimizer(
-        model_class=model_class, # BertSequenceModel
+        model_class=model_class, 
         model_params=dict(hidden_dim=hidden_dim, feature2vocab_dict=feature2vocab_size),
         lr=3e-4,
     )
-    sum_params, sum_learnable_params = model_num_params(model, verbose_all=False)
 
+    
     scheduler = CosineWarmupScheduler(
         optimizer=optimizer,
         warmup=epochs // 10,

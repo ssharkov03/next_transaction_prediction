@@ -188,7 +188,8 @@ def collate_fn(batch):
     sequences_batch = sequences_batch[:, -MAX_SEQ_LEN:, ...]
     return sequences_batch
 
-def create_dataloaders(features_list, train_data_path, val_data_path):
+
+def create_dataloaders(features_list, train_data_path, val_data_path, batch_size=16):
     """
     Создание даталодеров и словаря с длинами словарей по фичам.
     """
@@ -198,7 +199,6 @@ def create_dataloaders(features_list, train_data_path, val_data_path):
     train_ds = SequenceDataset(data_path=train_data_path, feature2preprocess=feature2preprocess, train=True)
     val_ds = SequenceDataset(data_path=val_data_path, feature2preprocess=feature2preprocess)
 
-    batch_size = 16
     num_workers = 0
 
     dataloader_train = DataLoader(
